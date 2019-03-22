@@ -3,6 +3,7 @@
 #include "../Include/Types.h"
 #include "../Include/Winheaders.h"
 #include "Utils.h"
+#include "InitOnce.h"
 
 #include <unordered_map>
 
@@ -15,11 +16,14 @@ namespace blackbone
 class DynImport
 {
 public:
-    static DynImport& Instance()
+    BLACKBONE_API static DynImport& Instance()
     {
         static DynImport instance;
         return instance;
     }
+
+    DynImport() = default;
+    DynImport( const DynImport& ) = delete;
 
     /// <summary>
     /// Get dll function
@@ -27,8 +31,10 @@ public:
     /// <param name="name">Function name</param>
     /// <returns>Function pointer</returns>
     template<typename T>
-    inline T get( const std::string& name ) 
+    T get( const std::string& name ) 
     {
+        InitializeOnce();
+
         CSLock lck( _mapGuard );
 
         auto iter = _funcs.find( name );
@@ -46,7 +52,7 @@ public:
     /// <param name="...args">Function args</param>
     /// <returns>Function result or STATUS_ORDINAL_NOT_FOUND if import not found</returns>
     template<typename T, typename... Args>
-    inline NTSTATUS safeNativeCall( const std::string& name, Args&&... args )
+    NTSTATUS safeNativeCall( const std::string& name, Args&&... args )
     {
         auto pfn = DynImport::get<T>( name );
         return pfn ? pfn( std::forward<Args>( args )... ) : STATUS_ORDINAL_NOT_FOUND;
@@ -60,10 +66,10 @@ public:
     /// <param name="...args">Function args</param>
     /// <returns>Function result or 0 if import not found</returns>
     template<typename T, typename... Args>
-    inline auto safeCall( const std::string& name, Args&&... args ) -> typename std::result_of<T(Args...)>::type
+    auto safeCall( const std::string& name, Args&&... args )
     {
         auto pfn = DynImport::get<T>( name );
-        return pfn ? pfn( std::forward<Args>( args )... ) : (std::result_of<T( Args... )>::type)(0);
+		return pfn ? pfn( std::forward<Args>( args )... ) : std::invoke_result_t<T, Args...>();
     }
 
     /// <summary>
@@ -72,7 +78,11 @@ public:
     /// <param name="name">Function name</param>
     /// <param name="module">Module name</param>
     /// <returns>true on success</returns>
-    BLACKBONE_API FARPROC load( const std::string& name, const std::wstring& module );
+    BLACKBONE_API FARPROC load( const std::string& name, const std::wstring& module )
+    {
+        auto mod = GetModuleHandleW( module.c_str() );
+        return load( name, mod );
+    }
 
     /// <summary>
     /// Load function into database
@@ -80,11 +90,19 @@ public:
     /// <param name="name">Function name</param>
     /// <param name="hMod">Module base</param>
     /// <returns>true on success</returns>
-    BLACKBONE_API FARPROC load( const std::string& name, HMODULE hMod );
+    BLACKBONE_API FARPROC load( const std::string& name, HMODULE hMod )
+    {
+        CSLock lck( _mapGuard );
 
-private:
-    DynImport() = default;
-    DynImport( const DynImport& ) = delete;
+        auto proc = GetProcAddress( hMod, name.c_str() );
+        if (proc)
+        {
+            _funcs.insert( std::make_pair( name, proc ) );
+            return proc;
+        }
+
+        return nullptr;
+    }
 
 private:
     std::unordered_map<std::string, FARPROC> _funcs;    // function database

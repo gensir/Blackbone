@@ -10,9 +10,9 @@ template<typename Fn, class C = NoClass>
 class VTableDetour : public Detour<Fn, C>
 {
 public:
-    typedef typename HookHandler<Fn, C>::type type;
-    typedef typename HookHandler<Fn, C>::hktype hktype;
-    typedef typename HookHandler<Fn, C>::hktypeC hktypeC;
+    using type    = typename HookHandler<Fn, C>::type;
+    using hktype  = typename HookHandler<Fn, C>::hktype;
+    using hktypeC = typename HookHandler<Fn, C>::hktypeC;
 
 public:
     VTableDetour()
@@ -31,18 +31,27 @@ public:
     /// <param name="ppVtable">Pointer to vtable pointer</param>
     /// <param name="index">Function index</param>
     /// <param name="hkPtr">Hook function address</param>
+    /// <param name="order">Call order. Hook before original or vice versa</param>
+    /// <param name="retType">Return value. Use origianl or value from hook</param>
     /// <param name="copyVtable">if true, vtable will be copied and edited, otherwise existing vtable will be edited</param>
     /// <param name="vtableLen">Optional. Valid only when copyVtable is true. Number of function in vtable. 
     /// Used to determine number of function to copy</param>
     /// <returns>true on success</returns>
-    bool Hook( void** ppVtable, int index, hktype hkPtr, bool copyVtable = false, int vtableLen = 0 )
+    bool Hook( 
+        void** ppVtable, 
+        int index, 
+        hktype hkPtr, 
+        CallOrder::e order = CallOrder::HookFirst,
+        ReturnMethod::e retType = ReturnMethod::UseOriginal,
+        bool copyVtable = false, 
+        int vtableLen = 0 
+        )
     {
-        AsmJitHelper jmpToHook;
-
-        //_order = CallOrder::HookFirst;
-        //_retType = ReturnMethod::UseOriginal;
+        auto jmpToHook = AsmFactory::GetAssembler();
 
         this->_type = HookType::VTable;
+        this->_order = order;
+        this->_retType = retType;
         this->_callOriginal = this->_original = (*(void***)ppVtable)[index];
         this->_callback = hkPtr;
         this->_internalHandler = &HookHandler<Fn, C>::Handler;
@@ -54,15 +63,15 @@ public:
         // Construct jump to hook handler
 #ifdef USE64
         // mov gs:[0x28], this
-        jmpToHook->mov( asmjit::host::rax, (uint64_t)this );
-        jmpToHook->mov( asmjit::host::qword_ptr_abs( 0x28 ).setSegment( asmjit::host::gs ), asmjit::host::rax );
+        (*jmpToHook)->mov( asmjit::host::rax, (uint64_t)this );
+        (*jmpToHook)->mov( asmjit::host::qword_ptr_abs( 0x28 ).setSegment( asmjit::host::gs ), asmjit::host::rax );
 #else
         // mov fs:[0x14], this
-        jmpToHook->mov( asmjit::host::dword_ptr_abs( 0x14 ).setSegment( asmjit::host::fs ), (uint32_t)this );
+        (*jmpToHook)->mov( asmjit::host::dword_ptr_abs( 0x14 ).setSegment( asmjit::host::fs ), (uint32_t)this );
 #endif // USE64
 
-        jmpToHook->jmp( (asmjit::Ptr)this->_internalHandler );
-        jmpToHook->relocCode( this->_buf );
+        (*jmpToHook)->jmp( (asmjit::Ptr)this->_internalHandler );
+        (*jmpToHook)->relocCode( this->_buf );
 
         // Modify VTable copy
         if (copyVtable)
@@ -70,7 +79,7 @@ public:
             // Copy VTable
             if (vtableLen != 0)
             {
-                memcpy( this->_buf + 0x300, *ppVtable, vtableLen * sizeof( void* ) );
+                memcpy( this->_buf + 0x300 - sizeof( void* ), (*(void***)ppVtable) - 1, vtableLen * sizeof( void* ) );
             }
             else 
             {
@@ -86,7 +95,7 @@ public:
                     vptr = (*(uintptr_t**)ppVtable)[vtableLen];
                     if (vptr < imageBase || vptr >= imageBase + imageSzie)
                     {
-                        memcpy( this->_buf + 0x300, *ppVtable, vtableLen * sizeof( void* ) );
+                        memcpy( this->_buf + 0x300 - sizeof( void* ), (*(void***)ppVtable) - 1, vtableLen * sizeof( void* ) );
                         break;
                     }
                 }
@@ -116,14 +125,25 @@ public:
     /// <param name="index">Function index</param>
     /// <param name="hkPtr">Hook class member address</param>
     /// <param name="pClass">Hook class address</param>
+    /// <param name="order">Call order. Hook before original or vice versa</param>
+    /// <param name="retType">Return value. Use origianl or value from hook</param>
     /// <param name="copyVtable">if true, vtable will be copied and edited, otherwise existing vtable will be edited</param>
     /// <param name="vtableLen">Optional. Valid only when copyVtable is true. Number of function in vtable. 
     /// Used to determine number of function to copy</param>
     /// <returns>true on success</returns>
-    bool Hook( void** ppVtable, int index, hktypeC hkPtr, C* pClass, bool copyVtable = false, int vtableLen = 0 )
+    bool Hook( 
+        void** ppVtable, 
+        int index, 
+        hktypeC hkPtr, 
+        C* pClass,
+        CallOrder::e order = CallOrder::HookFirst,
+        ReturnMethod::e retType = ReturnMethod::UseOriginal,
+        bool copyVtable = false, 
+        int vtableLen = 0 
+        )
     {
         this->_callbackClass = pClass;
-        return Hook( ppVtable, index, brutal_cast<hktype>(hkPtr), copyVtable, vtableLen );
+        return Hook( ppVtable, index, brutal_cast<hktype>(hkPtr), order, retType, copyVtable, vtableLen );
     }
 
     /// <summary>

@@ -22,6 +22,7 @@ PEImage::PEImage( void )
 
 PEImage::~PEImage( void )
 {
+    Release();
 }
 
 /// <summary>
@@ -42,12 +43,11 @@ NTSTATUS PEImage::Load( const std::wstring& path, bool skipActx /*= false*/ )
         NULL, OPEN_EXISTING, 0, NULL
         );
 
-    if (_hFile != INVALID_HANDLE_VALUE)
+    if (_hFile)
     {
         // Try mapping as image
         _hMapping = CreateFileMappingW( _hFile, NULL, SEC_IMAGE | PAGE_READONLY, 0, 0, NULL );
-
-        if (_hMapping && _hMapping != INVALID_HANDLE_VALUE)
+        if (_hMapping)
         {
             _isPlainData = false;
             _pFileBase = MapViewOfFile( _hMapping, FILE_MAP_READ, 0, 0, 0 );
@@ -58,7 +58,7 @@ NTSTATUS PEImage::Load( const std::wstring& path, bool skipActx /*= false*/ )
             _isPlainData = true;
             _hMapping = CreateFileMappingW( _hFile, NULL, PAGE_READONLY, 0, 0, NULL );
 
-            if (_hMapping && _hMapping != INVALID_HANDLE_VALUE)
+            if (_hMapping)
                 _pFileBase = MapViewOfFile( _hMapping, FILE_MAP_READ, 0, 0, 0 );
         }
 
@@ -113,29 +113,15 @@ NTSTATUS PEImage::Reload()
 /// <param name="temporary">Preserve file paths for file reopening</param>
 void PEImage::Release( bool temporary /*= false*/ )
 {
-    if (_hctx != INVALID_HANDLE_VALUE)
+    if (_pFileBase)
     {
-        ReleaseActCtx( _hctx );
-        _hctx = INVALID_HANDLE_VALUE;
+        UnmapViewOfFile( _pFileBase );
+        _pFileBase = nullptr;
     }
 
-    if (_hMapping && _hMapping != INVALID_HANDLE_VALUE)
-    {
-        if (_pFileBase)
-        {
-            UnmapViewOfFile( _pFileBase );
-            _pFileBase = nullptr;
-        }
-
-        CloseHandle( _hMapping );
-        _hMapping = NULL;
-    }
-
-    if (_hFile != INVALID_HANDLE_VALUE)
-    {
-        CloseHandle( _hFile );
-        _hFile = INVALID_HANDLE_VALUE;
-    }
+    _hMapping.reset();
+    _hFile.reset();
+    _hctx.reset();
 
     // Reset pointers to data
     _pImageHdr32 = nullptr;
@@ -184,30 +170,28 @@ NTSTATUS PEImage::Parse( void* pImageBase /*= nullptr*/ )
     if (_pImageHdr32->Signature != IMAGE_NT_SIGNATURE)
         return STATUS_INVALID_IMAGE_FORMAT;
 
+    auto GetHeaderData = [this, &pSection]( auto pImageHeader )
+    {
+        _imgBase = pImageHeader->OptionalHeader.ImageBase;
+        _imgSize = pImageHeader->OptionalHeader.SizeOfImage;
+        _hdrSize = pImageHeader->OptionalHeader.SizeOfHeaders;
+        _epRVA = pImageHeader->OptionalHeader.AddressOfEntryPoint;
+        _subsystem = pImageHeader->OptionalHeader.Subsystem;
+        _DllCharacteristics = pImageHeader->OptionalHeader.DllCharacteristics;
+
+        pSection = reinterpret_cast<const IMAGE_SECTION_HEADER*>(pImageHeader + 1);
+    };
+
     // Detect x64 image
     if (_pImageHdr32->OptionalHeader.Magic == IMAGE_NT_OPTIONAL_HDR64_MAGIC)
     {
         _is64 = true;
-
-        _imgBase = _pImageHdr64->OptionalHeader.ImageBase;
-        _imgSize = _pImageHdr64->OptionalHeader.SizeOfImage;
-        _hdrSize = _pImageHdr64->OptionalHeader.SizeOfHeaders;
-        _epRVA   = _pImageHdr64->OptionalHeader.AddressOfEntryPoint;
-        _subsystem = _pImageHdr64->OptionalHeader.Subsystem;
-
-        pSection = reinterpret_cast<const IMAGE_SECTION_HEADER*>(_pImageHdr64 + 1);
+        GetHeaderData( _pImageHdr64 );
     }
     else
     {
         _is64 = false;
-
-        _imgBase = _pImageHdr32->OptionalHeader.ImageBase;
-        _imgSize = _pImageHdr32->OptionalHeader.SizeOfImage;
-        _hdrSize = _pImageHdr32->OptionalHeader.SizeOfHeaders;
-        _epRVA   = _pImageHdr32->OptionalHeader.AddressOfEntryPoint;
-        _subsystem = _pImageHdr32->OptionalHeader.Subsystem;
-
-        pSection = reinterpret_cast<const IMAGE_SECTION_HEADER*>(_pImageHdr32 + 1);
+        GetHeaderData( _pImageHdr32 );
     }
 
     // Exe file
@@ -233,7 +217,7 @@ NTSTATUS PEImage::Parse( void* pImageBase /*= nullptr*/ )
 
     // Sections
     for (int i = 0; i < _pImageHdr32->FileHeader.NumberOfSections; ++i, ++pSection)
-        _sections.push_back( *pSection );
+        _sections.emplace_back( *pSection );
 
     return STATUS_SUCCESS;
 }
@@ -383,46 +367,14 @@ void PEImage::GetExports( vecExports& exports )
 /// <param name="index">Directory index</param>
 /// <param name="keepRelative">Keep address relative to image base</param>
 /// <returns>Directory address</returns>
-size_t PEImage::DirectoryAddress( int index, bool keepRelative /*= false*/ ) const
+uintptr_t PEImage::DirectoryAddress( int index, AddressType type /*= VA*/ ) const
 {
     // Sanity check
     if (index < 0 || index >= IMAGE_NUMBEROF_DIRECTORY_ENTRIES)
         return 0;
 
-    const IMAGE_DATA_DIRECTORY* idd = _is64 ? _pImageHdr64->OptionalHeader.DataDirectory 
-                                            : _pImageHdr32->OptionalHeader.DataDirectory;
-
-    if (idd[index].VirtualAddress == 0)
-        return 0;
-    else
-        return ResolveRVAToVA( idd[index].VirtualAddress, keepRelative );
-}
-
-/// <summary>
-/// Resolve virtual memory address to physical file offset
-/// </summary>
-/// <param name="Rva">Memory address</param>
-/// <param name="keepRelative">Keep address relative to file start</param>
-/// <returns>Resolved address</returns>
-uintptr_t PEImage::ResolveRVAToVA( uintptr_t Rva, bool keepRelative /*= false*/ ) const
-{
-    if (_isPlainData)
-    {
-        for (auto& sec : _sections)
-        {
-            if (Rva >= sec.VirtualAddress && Rva < sec.VirtualAddress + sec.Misc.VirtualSize)
-            {
-                if (keepRelative)
-                    return  (Rva - sec.VirtualAddress + sec.PointerToRawData);
-                else
-                    return reinterpret_cast<uintptr_t>(_pFileBase) + (Rva - sec.VirtualAddress + sec.PointerToRawData);
-            }
-        }
-
-        return 0;
-    }
-    else
-        return (keepRelative ? Rva : (reinterpret_cast<uintptr_t>(_pFileBase) + Rva));
+    const auto idd = _is64 ? _pImageHdr64->OptionalHeader.DataDirectory  : _pImageHdr32->OptionalHeader.DataDirectory;
+    return idd[index].VirtualAddress == 0 ? 0 : ResolveRVAToVA( idd[index].VirtualAddress, type );
 }
 
 /// <summary>
@@ -442,6 +394,43 @@ size_t PEImage::DirectorySize( int index ) const
 
 
 /// <summary>
+/// Resolve virtual memory address to physical file offset
+/// </summary>
+/// <param name="Rva">Memory address</param>
+/// <param name="keepRelative">Keep address relative to file start</param>
+/// <returns>Resolved address</returns>
+uintptr_t PEImage::ResolveRVAToVA( uintptr_t Rva, AddressType type /*= VA*/ ) const
+{
+    switch (type)
+    {
+    case blackbone::pe::RVA:
+        return Rva;
+
+    case blackbone::pe::VA:
+    case blackbone::pe::RPA:
+        if (_isPlainData)
+        {
+            for (auto& sec : _sections)
+            {
+                if (Rva >= sec.VirtualAddress && Rva < sec.VirtualAddress + sec.Misc.VirtualSize)
+                    if (type == VA)
+                        return reinterpret_cast<uintptr_t>(_pFileBase) + Rva - sec.VirtualAddress + sec.PointerToRawData;
+                    else
+                        return Rva - sec.VirtualAddress + sec.PointerToRawData;
+            }
+
+            return 0;
+        }
+        else
+            return (type == VA) ? (reinterpret_cast<uintptr_t>(_pFileBase) + Rva) : Rva;
+
+    default:
+        return 0;
+    }
+
+}
+
+/// <summary>
 /// Retrieve image TLS callbacks
 /// Callbacks are rebased for target image
 /// </summary>
@@ -456,6 +445,8 @@ int PEImage::GetTLSCallbacks( module_t targetBase, std::vector<ptr_t>& result ) 
         return 0;
 
     uint64_t offset = _is64 ? TLS64( pTls )->AddressOfCallBacks : TLS32( pTls )->AddressOfCallBacks;
+    if (offset == 0)
+        return 0;
 
     // Not at base
     if (imageBase() != reinterpret_cast<module_t>(_pFileBase))
@@ -504,14 +495,14 @@ NTSTATUS PEImage::PrepareACTX( const wchar_t* filepath /*= nullptr*/ )
 
         GetTempPathW( ARRAYSIZE( tempDir ), tempDir );
         if (GetTempFileNameW( tempDir, L"ImageManifest", 0, tempPath ) == 0)
-            return STATUS_UNSUCCESSFUL;
+            return STATUS_SXS_CANT_GEN_ACTCTX;
      
-        HANDLE hTmpFile = CreateFileW( tempPath, FILE_GENERIC_WRITE, 0, NULL, OPEN_ALWAYS, 0, NULL );
+        auto hTmpFile = FileHandle( CreateFileW( tempPath, FILE_GENERIC_WRITE, 0, NULL, OPEN_ALWAYS, 0, NULL ) );
         if (hTmpFile != INVALID_HANDLE_VALUE)
         {
             DWORD bytes = 0;
             WriteFile( hTmpFile, pManifest, manifestSize, &bytes, NULL );
-            CloseHandle( hTmpFile );
+            hTmpFile.reset();
 
             act.lpSource = tempPath;
             _manifestPath = tempPath;

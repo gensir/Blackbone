@@ -3,7 +3,7 @@
 #include "../Misc/Trace.hpp"
 #include "../Misc/DynImport.h"
 
-#include "VersionHelpers.h"
+#include <3rd_party/VersionApi.h>
 
 namespace blackbone
 {
@@ -12,15 +12,7 @@ namespace blackbone
 
 DriverControl::DriverControl()
 {
-    HMODULE ntdll = GetModuleHandleW( L"ntdll.dll" );
-
-    LOAD_IMPORT( "NtLoadDriver", ntdll );
-    LOAD_IMPORT( "NtUnloadDriver", ntdll );
-    LOAD_IMPORT( "RtlDosPathNameToNtPathName_U", ntdll );
-    LOAD_IMPORT( "RtlInitUnicodeString", ntdll );
-    LOAD_IMPORT( "RtlFreeUnicodeString", ntdll );
 }
-
 
 DriverControl::~DriverControl()
 {
@@ -41,7 +33,7 @@ DriverControl& DriverControl::Instance()
 NTSTATUS DriverControl::EnsureLoaded( const std::wstring& path /*= L"" */ )
 {
     // Already open
-    if (_hDriver != INVALID_HANDLE_VALUE)
+    if (_hDriver)
         return STATUS_SUCCESS;
 
     // Try to open handle to existing driver
@@ -52,7 +44,7 @@ NTSTATUS DriverControl::EnsureLoaded( const std::wstring& path /*= L"" */ )
         NULL, OPEN_EXISTING, 0, NULL
         );
 
-    if (_hDriver != INVALID_HANDLE_VALUE)
+    if (_hDriver)
         return _loadStatus = STATUS_SUCCESS;
 
     // Start new instance
@@ -74,15 +66,15 @@ NTSTATUS DriverControl::Reload( std::wstring path /*= L"" */ )
         const wchar_t* filename = nullptr;
 
         if (IsWindows10OrGreater())
-            filename = L"BlackBoneDrv10.sys";
+            filename = BLACKBONE_FILE_NAME_10;
         else if (IsWindows8Point1OrGreater())
-            filename = L"BlackBoneDrv81.sys";
+            filename = BLACKBONE_FILE_NAME_81;
         else if (IsWindows8OrGreater())
-            filename = L"BlackBoneDrv8.sys";
+            filename = BLACKBONE_FILE_NAME_8;
         else if (IsWindows7OrGreater())
-            filename = L"BlackBoneDrv7.sys";
+            filename = BLACKBONE_FILE_NAME_7;
         else
-            filename = L"BlackBoneDrv.sys";
+            filename = BLACKBONE_FILE_NAME;
 
         path = Utils::GetExeDirectory() + L"\\" + filename;
     }
@@ -91,7 +83,7 @@ NTSTATUS DriverControl::Reload( std::wstring path /*= L"" */ )
     if (!NT_SUCCESS( _loadStatus ))
     {
         BLACKBONE_TRACE( L"Failed to load driver %ls. Status 0x%X", path.c_str(), _loadStatus );
-        return LastNtStatus( _loadStatus );
+        return _loadStatus;
     }
 
     _hDriver = CreateFileW( 
@@ -101,7 +93,7 @@ NTSTATUS DriverControl::Reload( std::wstring path /*= L"" */ )
         NULL, OPEN_EXISTING, 0, NULL
         );
 
-    if (_hDriver == INVALID_HANDLE_VALUE)
+    if (!_hDriver)
     {
         _loadStatus = LastNtStatus();
         BLACKBONE_TRACE( L"Failed to open driver handle. Status 0x%X", _loadStatus );
@@ -117,12 +109,7 @@ NTSTATUS DriverControl::Reload( std::wstring path /*= L"" */ )
 /// <returns>Status code</returns>
 NTSTATUS DriverControl::Unload()
 {
-    if (_hDriver != INVALID_HANDLE_VALUE)
-    {
-        CloseHandle( _hDriver );
-        _hDriver = INVALID_HANDLE_VALUE;
-    }
-
+    _hDriver.reset();
     return UnloadDriver( DRIVER_SVC_NAME );
 }
 
@@ -283,12 +270,19 @@ NTSTATUS DriverControl::DisableDEP( DWORD pid )
 /// Change process protection flag
 /// </summary>
 /// <param name="pid">Target PID</param>
-/// <param name="enable">true to enable protection, false to disable</param>
+/// <param name="protection">Process protection policy</param>
+/// <param name="dynamicCode">Prohibit dynamic code</param>
+/// <param name="binarySignature">Prohibit loading non-microsoft dlls</param>
 /// <returns>Status code</returns>
-NTSTATUS DriverControl::ProtectProcess( DWORD pid, bool enable )
+NTSTATUS DriverControl::ProtectProcess(
+    DWORD pid,
+    PolicyOpt protection,
+    PolicyOpt dynamicCode /*= Policy_Keep*/,
+    PolicyOpt binarySignature /*= Policy_Keep*/
+    )
 {
     DWORD bytes = 0;
-    SET_PROC_PROTECTION setProt = { pid, enable };
+    SET_PROC_PROTECTION setProt = { pid, protection, dynamicCode, binarySignature };
 
     // Not loaded
     if (_hDriver == INVALID_HANDLE_VALUE)
@@ -706,22 +700,25 @@ NTSTATUS DriverControl::UnlinkHandleTable( DWORD pid )
 /// <returns>Status code</returns>
 NTSTATUS DriverControl::EnumMemoryRegions( DWORD pid, std::vector<MEMORY_BASIC_INFORMATION64>& regions )
 {
+    // Not loaded
+    if (_hDriver == INVALID_HANDLE_VALUE)
+    {
+        return STATUS_DEVICE_DOES_NOT_EXIST;
+    }
+
     DWORD bytes = 0;
     ENUM_REGIONS data = { 0 };
-    auto result = (PENUM_REGIONS_RESULT)malloc( sizeof( ENUM_REGIONS_RESULT ) );
+    DWORD size = sizeof( ENUM_REGIONS_RESULT );
+    auto result = reinterpret_cast<PENUM_REGIONS_RESULT>(malloc( size ));
 
     data.pid = pid;
     result->count = 0;
 
-    // Not loaded
-    if (_hDriver == INVALID_HANDLE_VALUE)
-        return STATUS_DEVICE_DOES_NOT_EXIST;
-
-    DeviceIoControl( _hDriver, IOCTL_BLACKBONE_ENUM_REGIONS, &data, sizeof( data ), result, sizeof( ENUM_REGIONS_RESULT ), &bytes, NULL );
+    DeviceIoControl( _hDriver, IOCTL_BLACKBONE_ENUM_REGIONS, &data, sizeof( data ), result, size, &bytes, NULL );
 
     result->count += 100;
-    DWORD size = static_cast<DWORD>(result->count * sizeof( result->regions[0] ) + sizeof( result->count ));
-    result = (PENUM_REGIONS_RESULT)realloc( result, size );
+    size = static_cast<DWORD>(result->count * sizeof( result->regions[0] ) + sizeof( result->count ));
+    result = reinterpret_cast<PENUM_REGIONS_RESULT>(realloc( result, size ));
 
     if (!DeviceIoControl( _hDriver, IOCTL_BLACKBONE_ENUM_REGIONS, &data, sizeof( data ), result, size, &bytes, NULL ))
     {
@@ -742,7 +739,6 @@ NTSTATUS DriverControl::EnumMemoryRegions( DWORD pid, std::vector<MEMORY_BASIC_I
     }
     
     free( result );
-
     return STATUS_SUCCESS;
 }
 

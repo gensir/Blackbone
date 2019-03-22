@@ -79,10 +79,10 @@ LONG BBSafeSearchString( IN PUNICODE_STRING source, IN PUNICODE_STRING target, I
         return -1;
 
     USHORT diff = source->Length - target->Length;
-    for (USHORT i = 0; i < diff; i++)
+    for (USHORT i = 0; i <= (diff / sizeof( WCHAR )); i++)
     {
         if (RtlCompareUnicodeStrings(
-            source->Buffer + i / sizeof( WCHAR ),
+            source->Buffer + i,
             target->Length / sizeof( WCHAR ),
             target->Buffer,
             target->Length / sizeof( WCHAR ),
@@ -222,6 +222,17 @@ NTSTATUS BBSearchPattern( IN PCUCHAR pattern, IN UCHAR wildcard, IN ULONG_PTR le
     }
 
     return STATUS_NOT_FOUND;
+}
+
+/// <summary>
+/// Check if process is terminating
+/// </summary>
+/// <param name="imageBase">Process</param>
+/// <returns>If TRUE - terminating</returns>
+BOOLEAN BBCheckProcessTermination( PEPROCESS pProcess )
+{
+    LARGE_INTEGER zeroTime = { 0 };
+    return KeWaitForSingleObject( pProcess, Executive, KernelMode, FALSE, &zeroTime ) == STATUS_WAIT_0;
 }
 
 ULONG GenPrologue32( IN PUCHAR pBuf )

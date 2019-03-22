@@ -5,6 +5,14 @@
 
 #define FILE_DEVICE_BLACKBONE           0x8005
 
+#define BLACKBONE_FILE_EXT              L".sys"
+#define BLACKBONE_FILE_SUFFIX           L"Drv"
+#define BLACKBONE_FILE_NAME             BLACKBONE_DEVICE_NAME BLACKBONE_FILE_SUFFIX       BLACKBONE_FILE_EXT
+#define BLACKBONE_FILE_NAME_7           BLACKBONE_DEVICE_NAME BLACKBONE_FILE_SUFFIX L"7"  BLACKBONE_FILE_EXT
+#define BLACKBONE_FILE_NAME_8           BLACKBONE_DEVICE_NAME BLACKBONE_FILE_SUFFIX L"8"  BLACKBONE_FILE_EXT
+#define BLACKBONE_FILE_NAME_81          BLACKBONE_DEVICE_NAME BLACKBONE_FILE_SUFFIX L"81" BLACKBONE_FILE_EXT
+#define BLACKBONE_FILE_NAME_10          BLACKBONE_DEVICE_NAME BLACKBONE_FILE_SUFFIX L"10" BLACKBONE_FILE_EXT
+
 /*
     Disable process DEP
 
@@ -272,12 +280,24 @@ typedef struct _DISABLE_DEP
 } DISABLE_DEP, *PDISABLE_DEP;
 
 /// <summary>
+/// Policy activation option
+/// </summary>
+typedef enum _PolicyOpt
+{
+    Policy_Disable,
+    Policy_Enable,
+    Policy_Keep,        // Don't change current value
+} PolicyOpt;
+
+/// <summary>
 /// Input for IOCTL_BLACKBONE_SET_PROTECTION
 /// </summary>
 typedef struct _SET_PROC_PROTECTION
 {
-    ULONG   pid;            // Process ID
-    BOOLEAN enableState;    // TRUE to enable, FALSE to disable
+    ULONG pid;              // Process ID
+    PolicyOpt protection;   // Process protection
+    PolicyOpt dynamicCode;  // DynamiCode policy
+    PolicyOpt signature;    // BinarySignature policy
 } SET_PROC_PROTECTION, *PSET_PROC_PROTECTION;
 
 /// <summary>
@@ -436,6 +456,7 @@ typedef enum _MmapFlags
     KWipeHeader      = 0x04,    // Wipe image PE headers
     KHideVAD         = 0x10,    // Make image appear as PAGE_NOACESS region
     KRebaseProcess   = 0x40,    // If target image is an .exe file, process base address will be replaced with mapped module value
+    KNoThreads       = 0x80,    // Don't create new threads, use hijacking
 
     KNoExceptions    = 0x01000, // Do not create custom exception handler
     KNoSxS           = 0x08000, // Do not apply SxS activation context

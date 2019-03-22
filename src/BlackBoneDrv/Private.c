@@ -17,6 +17,7 @@ extern DYNAMIC_DATA dynData;
 PVOID g_KernelBase = NULL;
 ULONG g_KernelSize = 0;
 PSYSTEM_SERVICE_DESCRIPTOR_TABLE g_SSDT = NULL;
+KDDEBUGGER_DATA64 g_KdBlock = {0};
 
 MMPTE ValidKernelPte =
 {
@@ -27,6 +28,24 @@ MMPTE ValidKernelPte =
     MM_PTE_ACCESS_MASK
 };
 
+/// <summary>
+/// Initialize debugger block g_KdBlock
+/// </summary>
+VOID InitializeDebuggerBlock()
+{
+    CONTEXT context = { 0 };
+    context.ContextFlags = CONTEXT_FULL;
+    RtlCaptureContext( &context );
+    
+    PDUMP_HEADER dumpHeader = ExAllocatePool( NonPagedPool, DUMP_BLOCK_SIZE );
+    if (dumpHeader)
+    {
+        KeCapturePersistentThreadState( &context, NULL, 0, 0, 0, 0, 0, dumpHeader );
+        RtlCopyMemory( &g_KdBlock, (PUCHAR)dumpHeader + KDDEBUGGER_DATA_OFFSET, sizeof( g_KdBlock ) );
+
+        ExFreePool( dumpHeader );
+    }
+}
 
 /// <summary>
 /// Lookup handle in the process handle table
@@ -239,7 +258,7 @@ PVOID GetSSDTEntry( IN ULONG index )
 /// <returns>Found PTE</returns>
 PMMPTE GetPTEForVA( IN PVOID pAddress )
 {
-    if (dynData.ver == WINVER_10_AU)
+    if (dynData.ver >= WINVER_10_RS1)
     {
         // Check if large page
         PMMPTE pPDE = (PMMPTE)(((((ULONG_PTR)pAddress >> PDI_SHIFT) << PTE_SHIFT) & 0x3FFFFFF8ull) + dynData.DYN_PDE_BASE);
@@ -453,8 +472,8 @@ NTSTATUS
 NTAPI
 ZwProtectVirtualMemory(
     IN HANDLE ProcessHandle,
-    IN PVOID* BaseAddress,
-    IN SIZE_T* NumberOfBytesToProtect,
+    IN OUT PVOID* BaseAddress,
+    IN OUT SIZE_T* NumberOfBytesToProtect,
     IN ULONG NewAccessProtection,
     OUT PULONG OldAccessProtection
     )
@@ -470,9 +489,17 @@ ZwProtectVirtualMemory(
         //
         PUCHAR pPrevMode = (PUCHAR)PsGetCurrentThread() + dynData.PrevMode;
         UCHAR prevMode = *pPrevMode;
+        PVOID BaseCopy = NULL;
+        SIZE_T SizeCopy = 0;
         *pPrevMode = KernelMode;
 
-        status = NtProtectVirtualMemory( ProcessHandle, BaseAddress, NumberOfBytesToProtect, NewAccessProtection, OldAccessProtection );
+        if (BaseAddress)
+            BaseCopy = *BaseAddress;
+
+        if (NumberOfBytesToProtect)
+            SizeCopy = *NumberOfBytesToProtect;
+
+        status = NtProtectVirtualMemory( ProcessHandle, &BaseCopy, &SizeCopy, NewAccessProtection, OldAccessProtection );
 
         *pPrevMode = prevMode;
     }

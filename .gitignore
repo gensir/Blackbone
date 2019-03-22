@@ -48,6 +48,7 @@ _ReSharper*/
 
 #Project files
 [Bb]uild/
+obj/
 
 #Subversion files
 .svn
@@ -79,3 +80,8 @@ GeneratedFiles*/
 *.idb
 *.opendb
 *.db
+*.sqlite
+/.vs
+*.db-shm
+*.db-wal
+*.json

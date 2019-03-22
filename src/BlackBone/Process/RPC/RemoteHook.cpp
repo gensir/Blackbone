@@ -71,6 +71,7 @@ void RemoteHook::EndDebug()
     {
         _active = false;
         WaitForSingleObject( _hEventThd, INFINITE );
+        CloseHandle( _hEventThd );
         _hEventThd = NULL;
     }
 }
@@ -84,7 +85,7 @@ void RemoteHook::EndDebug()
 /// <param name="pClass">Class reference.</param>
 /// <param name="pThread">Thread to hook. Valid only for HWBP</param>
 /// <returns>Status code</returns>
-NTSTATUS RemoteHook::ApplyP( eHookType type, uint64_t ptr, fnCallback newFn, const void* pClass /*= nullptr*/, Thread* pThread /*= nullptr*/ )
+NTSTATUS RemoteHook::ApplyP( eHookType type, uint64_t ptr, fnCallback newFn, const void* pClass /*= nullptr*/, ThreadPtr pThread /*= nullptr*/ )
 {
     NTSTATUS status = EnsureDebug();
     if (!NT_SUCCESS( status ))
@@ -102,7 +103,7 @@ NTSTATUS RemoteHook::ApplyP( eHookType type, uint64_t ptr, fnCallback newFn, con
     HookData data = { { 0 } };
 
     // Store old byte
-    data.oldByte = _memory.Read<uint8_t>( ptr );
+    data.oldByte = _memory.Read<uint8_t>( ptr ).result();
     data.type = type;
     data.onExecute.freeFn = newFn;
     data.onExecute.classFn.classPtr = pClass;
@@ -115,16 +116,15 @@ NTSTATUS RemoteHook::ApplyP( eHookType type, uint64_t ptr, fnCallback newFn, con
         // Set for single thread
         if (pThread != nullptr)
         {
-            data.hwbp_idx = pThread->AddHWBP( ptr, hwbp_execute, hwbp_1 );
+            data.hwbp_idx = pThread->AddHWBP( ptr, hwbp_execute, hwbp_1 ).result( -1 );
             if (data.hwbp_idx == -1)
                 return STATUS_NO_MORE_ENTRIES;
         }
         // Set for all threads
         else
         {
-            auto& threads = _memory.process()->threads().getAll();     
-            for (auto& thread : threads)
-                thread.AddHWBP( ptr, hwbp_execute, hwbp_1 );
+            for (auto& thread : _memory.process()->threads().getAll())
+                thread->AddHWBP( ptr, hwbp_execute, hwbp_1 );
         }
     }
     // Write int3
@@ -140,7 +140,7 @@ NTSTATUS RemoteHook::ApplyP( eHookType type, uint64_t ptr, fnCallback newFn, con
     }
 
     // Store hooked address
-    _hooks.emplace( std::make_pair( ptr, data ) );
+    _hooks.emplace( ptr, data );
 
     return STATUS_SUCCESS;
 }
@@ -204,9 +204,9 @@ void RemoteHook::Restore( const HookData &hook, uint64_t ptr )
         }   
         else
         {
-            auto& threads = _memory.process()->threads().getAll();
+            auto threads = _memory.process()->threads().getAll();
             for (auto& thread : threads)
-                thread.RemoveHWBP( ptr );
+                thread->RemoveHWBP( ptr );
         }
     }
     // Restore original byte
@@ -253,9 +253,9 @@ DWORD RemoteHook::EventThread()
     // 
     // Reset debug flag in PEB
     //
-    _memory.Write( _core.peb64() + FIELD_OFFSET( _PEB64, BeingDebugged ), uint8_t( 0 ) );
+    _memory.Write( fieldPtr( _core.peb64(), &_PEB64::BeingDebugged ), uint8_t( 0 ) );
     if (!_x64Target)
-        _memory.Write( _core.peb32() + FIELD_OFFSET( _PEB32, BeingDebugged ), uint8_t( 0 ) );
+        _memory.Write( fieldPtr( _core.peb32(), &_PEB32::BeingDebugged ), uint8_t( 0 ) );
 
     _active = true;
 
@@ -297,6 +297,7 @@ DWORD RemoteHook::EventThread()
     if (_debugPID != 0)
     {
         DebugActiveProcessStop( _debugPID );
+
         _debugPID = 0;
     }
 
@@ -377,7 +378,7 @@ DWORD RemoteHook::OnBreakpoint( const DEBUG_EVENT& DebugEv )
         {
             hook.entryCtx = ctx64;
             auto newReturn = context.hookReturn();
-            _retHooks.emplace( std::make_pair( newReturn, addr ) );
+            _retHooks.emplace( newReturn, addr );
         }
 
         // Resume execution
@@ -463,7 +464,7 @@ DWORD RemoteHook::OnSinglestep( const DEBUG_EVENT& DebugEv )
             {
                 hook.entryCtx = ctx64;
                 auto newReturn = context.hookReturn();
-                _retHooks.emplace( std::make_pair( newReturn, addr ) );
+                _retHooks.emplace( newReturn, addr );
             }
 
             ctx64.ContextFlags = use64 ? CONTEXT64_ALL : WOW64_CONTEXT_ALL;
@@ -637,7 +638,7 @@ DWORD RemoteHook::StackBacktrace( ptr_t ip, ptr_t sp, Thread& thd, std::vector<s
     }
 
     // Store exception address
-    results.emplace_back( std::make_pair( 0, ip ) );
+    results.emplace_back( 0, ip );
 
     // Walk stack
     for (ptr_t stackPtr = sp; stackPtr < stack_base && i < depth; stackPtr += _wordSize)
@@ -670,7 +671,7 @@ DWORD RemoteHook::StackBacktrace( ptr_t ip, ptr_t sp, Thread& thd, std::vector<s
         // TODO: Implement more reliable way to detect 'call'
         if (codeChunk[0] == 0xFF || codeChunk[1] == 0xE8 || codeChunk[4] == 0xFF)
         {
-            results.emplace_back( std::make_pair( stackPtr, stack_val ) );
+            results.emplace_back( stackPtr, stack_val );
             i++;
         }
     }
@@ -683,17 +684,21 @@ DWORD RemoteHook::StackBacktrace( ptr_t ip, ptr_t sp, Thread& thd, std::vector<s
 /// </summary>
 void RemoteHook::reset()
 {
-    _lock.lock();
-    for (auto& hook : _hooks)
-        Restore( hook.second, hook.first );
+    if (!_hooks.empty())
+    {
+        _lock.lock();
+        for (auto& hook : _hooks)
+            Restore( hook.second, hook.first );
 
-    _hooks.clear();
-    _repatch.clear();
+        _hooks.clear();
+        _repatch.clear();
 
-    _lock.unlock();
+        _lock.unlock();
 
-    // Wait for last events to finish
-    Sleep( 100 );
+        // Wait for last events to finish
+        Sleep( 100 );
+    }
+
     EndDebug();
 }
 

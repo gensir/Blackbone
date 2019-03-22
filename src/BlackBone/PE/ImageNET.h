@@ -6,11 +6,15 @@
 
 #include <map>
 
+#if _MSC_VER >= 1920
+    #include <string>
+#endif
+
+#pragma warning(push)
 #pragma warning(disable : 4091)
-#include <cor.h>
-#include <CorError.h>
+#include "cor.h"
 #include <atlbase.h>
-#pragma warning(default : 4091)
+#pragma warning(pop)
 
 namespace blackbone
 {
@@ -21,7 +25,7 @@ namespace blackbone
 class ImageNET
 {
 public:
-    typedef std::map<std::pair<std::wstring, std::wstring>, uintptr_t> mapMethodRVA;
+    using mapMethodRVA = std::map<std::pair<std::wstring, std::wstring>, uintptr_t>;
 
 public:
     BLACKBONE_API ImageNET(void);

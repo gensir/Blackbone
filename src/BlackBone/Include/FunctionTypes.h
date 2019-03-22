@@ -51,7 +51,7 @@ typedef NTSTATUS( NTAPI *fnNtWow64ReadVirtualMemory64 )(
     );
 
 // NtWow64WriteVirtualMemory64
-typedef fnNtWow64ReadVirtualMemory64 fnNtWow64WriteVirtualMemory64;
+using fnNtWow64WriteVirtualMemory64 = fnNtWow64ReadVirtualMemory64;
 
 // NtWow64AllocateVirtualMemory64
 typedef NTSTATUS( NTAPI *fnNtWow64AllocateVirtualMemory64 )(
@@ -138,10 +138,10 @@ typedef NTSTATUS( NTAPI* fnNtLockVirtualMemory )(
 
 // RtlRbInsertNodeEx
 typedef int (NTAPI* fnRtlRbInsertNodeEx)(
-    PRTL_RB_TREE 	    Tree,
-    PRTL_BALANCED_NODE 	Parent,
-    BOOLEAN             Right,
-    PRTL_BALANCED_NODE 	Node
+    _RTL_RB_TREE<DWORD_PTR>*        Tree,
+    _RTL_BALANCED_NODE<DWORD_PTR>*  Parent,
+    BOOLEAN                         Right,
+    _RTL_BALANCED_NODE<DWORD_PTR> * Node
     );
 
 // NtSetInformationProcess
@@ -165,8 +165,8 @@ typedef NTSTATUS( NTAPI* fnNtDuplicateObject )(
 
 // RtlRbRemoveNode
 typedef int (NTAPI* fnRtlRbRemoveNode)(
-    PRTL_RB_TREE        Tree,
-    PRTL_BALANCED_NODE 	Node
+    _RTL_RB_TREE<DWORD_PTR>*        Tree,
+    _RTL_BALANCED_NODE<DWORD_PTR>*  Node
     );
 
 // RtlUpcaseUnicodeChar
@@ -218,28 +218,40 @@ typedef NTSTATUS( NTAPI *fnRtlCreateActivationContext )(
     OUT PVOID*  ActCtx
     );
 
+// NtQueueApcThread
+typedef NTSTATUS( NTAPI* fnNtQueueApcThread )(
+    IN HANDLE ThreadHandle,
+    IN PVOID ApcRoutine, /*PKNORMAL_ROUTINE*/
+    IN PVOID NormalContext,
+    IN PVOID SystemArgument1,
+    IN PVOID SystemArgument2
+    );
+
+// RtlQueueApcWow64Thread
+using fnRtlQueueApcWow64Thread = fnNtQueueApcThread;
+
 // RtlImageNtHeader
 typedef PIMAGE_NT_HEADERS( NTAPI* fnRtlImageNtHeader )(
     IN PVOID ModuleAddress
     );
 
 // RtlInitUnicodeString
-typedef decltype(&RtlInitUnicodeString) fnRtlInitUnicodeString;
+using fnRtlInitUnicodeString = decltype(&RtlInitUnicodeString);
 
 // RtlFreeUnicodeString
-typedef decltype(&RtlFreeUnicodeString) fnRtlFreeUnicodeString;
+using fnRtlFreeUnicodeString = decltype(&RtlFreeUnicodeString);
 
 // NtQuerySystemInformation
-typedef decltype(&NtQuerySystemInformation) fnNtQuerySystemInformation;
+using fnNtQuerySystemInformation = decltype(&NtQuerySystemInformation);
 
 // NtQueryInformationProcess
-typedef decltype(&NtQueryInformationProcess) fnNtQueryInformationProcess;
+using fnNtQueryInformationProcess = decltype(&NtQueryInformationProcess);
 
 // NtQueryInformationThread
-typedef decltype(&NtQueryInformationThread) fnNtQueryInformationThread;
+using fnNtQueryInformationThread = decltype(&NtQueryInformationThread);
 
 // NtQueryObject
-typedef decltype(&NtQueryObject) fnNtQueryObject;
+using fnNtQueryObject = decltype(&NtQueryObject);
 
 //
 // GCC compatibility

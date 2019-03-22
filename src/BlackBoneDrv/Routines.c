@@ -1,5 +1,6 @@
 #include "BlackBoneDrv.h"
 #include "Routines.h"
+#include "Utils.h"
 #include <Ntstrsafe.h>
 
 LIST_ENTRY g_PhysProcesses;
@@ -14,9 +15,18 @@ LONG g_trIndex = 0;         // Trampoline global index
 /// <returns>Found entry, NULL if not found</returns>
 PMEM_PHYS_ENTRY BBLookupPhysMemEntry( IN PLIST_ENTRY pList, IN PVOID pBase );
 VOID BBWriteTrampoline( IN PUCHAR place, IN PVOID pfn );
+BOOLEAN BBHandleCallback(
+#if !defined(_WIN7_)
+    IN PHANDLE_TABLE HandleTable,
+#endif
+    IN PHANDLE_TABLE_ENTRY HandleTableEntry, 
+    IN HANDLE Handle, 
+    IN PVOID EnumParameter 
+    );
 
 #pragma alloc_text(PAGE, BBDisableDEP)
 #pragma alloc_text(PAGE, BBSetProtection)
+#pragma alloc_text(PAGE, BBHandleCallback)
 #pragma alloc_text(PAGE, BBGrantAccess)
 #pragma alloc_text(PAGE, BBCopyMemory)
 #pragma alloc_text(PAGE, BBAllocateFreeMemory)
@@ -41,7 +51,6 @@ VOID BBWriteTrampoline( IN PUCHAR place, IN PVOID pfn );
 NTSTATUS BBDisableDEP( IN PDISABLE_DEP pData )
 {
     NTSTATUS status = STATUS_SUCCESS;
-    PKEXECUTE_OPTIONS pExecOpt = NULL;
     PEPROCESS pProcess = NULL;
 
     status = PsLookupProcessByProcessId( (HANDLE)pData->pid, &pProcess );
@@ -49,7 +58,7 @@ NTSTATUS BBDisableDEP( IN PDISABLE_DEP pData )
     {
         if (dynData.KExecOpt != 0)
         {
-            pExecOpt = (PKEXECUTE_OPTIONS)((PUCHAR)pProcess + dynData.KExecOpt);
+            PKEXECUTE_OPTIONS pExecOpt = (PKEXECUTE_OPTIONS)((PUCHAR)pProcess + dynData.KExecOpt);
 
             // Reset all flags
             pExecOpt->ExecuteOptions = 0;
@@ -88,35 +97,66 @@ NTSTATUS BBSetProtection( IN PSET_PROC_PROTECTION pProtection )
     {
         if (dynData.Protection != 0)
         {
+            PUCHAR pValue = (PUCHAR)pProcess + dynData.Protection;
+
             // Win7
             if (dynData.ver <= WINVER_7_SP1)
             {
-                if (pProtection->enableState)
-                    *(PULONG)((PUCHAR)pProcess + dynData.Protection) |= 1 << 0xB;
-                else
-                    *(PULONG)((PUCHAR)pProcess + dynData.Protection) &= ~(1 << 0xB);
+                if (pProtection->protection == Policy_Enable)
+                    *(PULONG)pValue |= 1 << 0xB;
+                else if (pProtection->protection == Policy_Disable)
+                    *(PULONG)pValue &= ~(1 << 0xB);
             }
             // Win8
             else if (dynData.ver == WINVER_8)
             {
-                *((PUCHAR)pProcess + dynData.Protection) = pProtection->enableState;
+                if (pProtection->protection != Policy_Keep)
+                    *pValue = pProtection->protection;
             }
             // Win8.1
             else if (dynData.ver >= WINVER_81)
             {
-                PS_PROTECTION protBuf = { 0 };
-
-                if (pProtection->enableState == FALSE)
+                // Protection
+                if (pProtection->protection == Policy_Disable)
                 {
-                    protBuf.Level = 0;
+                    *pValue = 0;
                 }
-                else
+                else if(pProtection->protection == Policy_Enable)
                 {
+                    PS_PROTECTION protBuf = { 0 };
+
                     protBuf.Flags.Signer = PsProtectedSignerWinTcb;
                     protBuf.Flags.Type = PsProtectedTypeProtected;
+                    *pValue = protBuf.Level;
                 }
 
-                *((PUCHAR)pProcess + dynData.Protection) = protBuf.Level;
+                // Dynamic code
+                if (pProtection->dynamicCode != Policy_Keep && dynData.EProcessFlags2 != 0)
+                {
+                    if (dynData.ver >= WINVER_10_RS3)
+                    {
+                        PMITIGATION_FLAGS pFlags2 = (PMITIGATION_FLAGS)((PUCHAR)pProcess + dynData.EProcessFlags2);
+                        pFlags2->DisableDynamicCode = pProtection->dynamicCode;
+                    }
+                    else
+                    {
+                        PEPROCESS_FLAGS2 pFlags2 = (PEPROCESS_FLAGS2)((PUCHAR)pProcess + dynData.EProcessFlags2);
+                        pFlags2->DisableDynamicCode = pProtection->dynamicCode;
+                    }
+
+                }
+                
+                // Binary signature
+                if (pProtection->signature != Policy_Keep)
+                {
+                    PSE_SIGNING_LEVEL pSignLevel = (PSE_SIGNING_LEVEL)((PUCHAR)pProcess + dynData.Protection - 2);
+                    PSE_SIGNING_LEVEL pSignLevelSection = (PSE_SIGNING_LEVEL)((PUCHAR)pProcess + dynData.Protection - 1);
+
+                    if(pProtection->signature == Policy_Enable)
+                        *pSignLevel = *pSignLevelSection = SE_SIGNING_LEVEL_MICROSOFT;
+                    else
+                        *pSignLevel = *pSignLevelSection = SE_SIGNING_LEVEL_UNCHECKED;
+                }                
             }
             else
                 status = STATUS_NOT_SUPPORTED;
@@ -137,17 +177,63 @@ NTSTATUS BBSetProtection( IN PSET_PROC_PROTECTION pProtection )
 }
 
 /// <summary>
+/// Handle enumeration callback
+/// </summary>
+/// <param name="HandleTable">Process handle table</param>
+/// <param name="HandleTableEntry">Handle entry</param>
+/// <param name="Handle">Handle value</param>
+/// <param name="EnumParameter">User context</param>
+/// <returns>TRUE when desired handle is found</returns>
+BOOLEAN BBHandleCallback(
+#if !defined(_WIN7_)
+    IN PHANDLE_TABLE HandleTable,
+#endif
+    IN PHANDLE_TABLE_ENTRY HandleTableEntry,
+    IN HANDLE Handle,
+    IN PVOID EnumParameter
+    )
+{
+
+    BOOLEAN result = FALSE;
+    ASSERT( EnumParameter );
+
+    if (EnumParameter != NULL)
+    {
+        PHANDLE_GRANT_ACCESS pAccess = (PHANDLE_GRANT_ACCESS)EnumParameter;
+        if (Handle == (HANDLE)pAccess->handle)
+        {
+            if (ExpIsValidObjectEntry( HandleTableEntry ))
+            {
+                // Update access
+                HandleTableEntry->GrantedAccessBits = pAccess->access;
+                result = TRUE;
+            }
+            else
+                DPRINT( "BlackBone: %s: 0x%X:0x%X handle is invalid\n. HandleEntry = 0x%p",
+                    __FUNCTION__, pAccess->pid, pAccess->handle, HandleTableEntry
+                    );
+        }
+    }
+
+#if !defined(_WIN7_)
+    // Release implicit locks
+    _InterlockedExchangeAdd8( (char*)&HandleTableEntry->VolatileLowValue, 1 );  // Set Unlocked flag to 1
+    if (HandleTable != NULL && HandleTable->HandleContentionEvent)
+        ExfUnblockPushLock( &HandleTable->HandleContentionEvent, NULL );
+#endif
+
+    return result;
+}
+
+/// <summary>
 /// Change handle granted access
 /// </summary>
 /// <param name="pAccess">Request params</param>
 /// <returns>Status code</returns>
 NTSTATUS BBGrantAccess( IN PHANDLE_GRANT_ACCESS pAccess )
 {
-    NTSTATUS  status = STATUS_SUCCESS;
+    NTSTATUS status = STATUS_SUCCESS;
     PEPROCESS pProcess = NULL;
-    PHANDLE_TABLE pTable = NULL;
-    PHANDLE_TABLE_ENTRY pHandleEntry = NULL;
-    EXHANDLE exHandle;
 
     // Validate dynamic offset
     if (dynData.ObjTable == 0)
@@ -157,25 +243,15 @@ NTSTATUS BBGrantAccess( IN PHANDLE_GRANT_ACCESS pAccess )
     }
 
     status = PsLookupProcessByProcessId( (HANDLE)pAccess->pid, &pProcess );
+    if (NT_SUCCESS( status ) && BBCheckProcessTermination( pProcess ))
+        status = STATUS_PROCESS_IS_TERMINATING;
+
     if (NT_SUCCESS( status ))
     {
-        pTable = *(PHANDLE_TABLE*)((PUCHAR)pProcess + dynData.ObjTable);
-        exHandle.Value = (ULONG_PTR)pAccess->handle;
-
-        if (pTable)
-            pHandleEntry = ExpLookupHandleTableEntry( pTable, exHandle );
-
-        if (ExpIsValidObjectEntry( pHandleEntry ))
-        {
-            pHandleEntry->GrantedAccessBits = pAccess->access;
-        }
-        else
-        {
-            DPRINT( "BlackBone: %s: 0x%X:0x%X handle is invalid. HandleEntry = 0x%p\n", 
-                    __FUNCTION__, pAccess->pid, pAccess->handle, pHandleEntry );
-
-            status = STATUS_UNSUCCESSFUL;
-        }
+        PHANDLE_TABLE pTable = *(PHANDLE_TABLE*)((PUCHAR)pProcess + dynData.ObjTable);
+        BOOLEAN found = ExEnumHandleTable( pTable, &BBHandleCallback, pAccess, NULL );
+        if (found == FALSE)
+            status = STATUS_NOT_FOUND;
     }
     else
         DPRINT( "BlackBone: %s: PsLookupProcessByProcessId failed with status 0x%X\n", __FUNCTION__, status );
@@ -413,7 +489,7 @@ NTSTATUS BBAllocateFreePhysical( IN PEPROCESS pProcess, IN PALLOCATE_FREE_MEMORY
             pResult->size = pAllocFree->size;
 
             // Set initial protection
-            BBProtectVAD( PsGetCurrentProcess(), pResult->address, BBConvertProtection( pAllocFree->protection, FALSE ) );
+            BBProtectVAD( pProcess, pResult->address, BBConvertProtection( pAllocFree->protection, FALSE ) );
 
             // Make pages executable
             if (pAllocFree->protection & (PAGE_EXECUTE | PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE))
@@ -546,7 +622,7 @@ NTSTATUS BBHideVAD( IN PHIDE_VAD pData )
 
     status = PsLookupProcessByProcessId( (HANDLE)pData->pid, &pProcess );
     if (NT_SUCCESS( status ))
-        status = BBProtectVAD( pProcess, pData->base, MM_ZERO_ACCESS );
+        status = BBUnlinkVAD( pProcess, pData->base );
     else
         DPRINT( "BlackBone: %s: PsLookupProcessByProcessId failed with status 0x%X\n", __FUNCTION__, status );
 

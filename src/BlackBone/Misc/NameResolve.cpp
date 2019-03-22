@@ -3,27 +3,14 @@
 #include "../Include/Macro.h"
 #include "../Misc/Utils.h"
 #include "../Misc/DynImport.h"
+#include "../Process/Process.h"
 
 #include <stdint.h>
 #include <algorithm>
-#include <VersionHelpers.h>
+#include <3rd_party/VersionApi.h>
 
 namespace blackbone
 {
-
-NameResolve::NameResolve()
-{
-    HMODULE ntdll = GetModuleHandleW( L"ntdll.dll" );
-
-    LOAD_IMPORT( "NtQuerySystemInformation", ntdll );
-    LOAD_IMPORT( "RtlDosApplyFileIsolationRedirection_Ustr", ntdll );
-    LOAD_IMPORT( "RtlInitUnicodeString", ntdll );
-    LOAD_IMPORT( "RtlFreeUnicodeString", ntdll );
-}
-
-NameResolve::~NameResolve()
-{
-}
 
 NameResolve& NameResolve::Instance()
 {
@@ -60,38 +47,40 @@ bool NameResolve::Initialize()
 /// OS dependent api set initialization
 /// </summary>
 /// <returns>true on success</returns>
-template<typename T1, typename T2, typename T3, typename T4>
+template<typename PApiSetMap, typename PApiSetEntry, typename PHostArray, typename PHostEntry>
 bool blackbone::NameResolve::InitializeP()
 {
     if (!_apiSchema.empty())
         return true;
 
     PEB_T *ppeb = reinterpret_cast<PEB_T*>(reinterpret_cast<TEB_T*>(NtCurrentTeb())->ProcessEnvironmentBlock);
-    T1 pSetMap = reinterpret_cast<T1>(ppeb->ApiSetMap);
+    PApiSetMap pSetMap = reinterpret_cast<PApiSetMap>(ppeb->ApiSetMap);
 
     for (DWORD i = 0; i < pSetMap->Count; i++)
     {
-        T2 pDescriptor = pSetMap->entry(i);
+        PApiSetEntry pDescriptor = pSetMap->entry(i);
 
         std::vector<std::wstring> vhosts;
         wchar_t dllName[MAX_PATH] = { 0 };
 
-        pSetMap->apiName( pDescriptor, dllName );
-        std::transform( dllName, dllName + MAX_PATH, dllName, ::tolower );
+        auto nameSize = pSetMap->apiName( pDescriptor, dllName );
+        std::transform( dllName, dllName + nameSize / sizeof( wchar_t ), dllName, ::towlower );
 
-        T3 pHostData = pSetMap->valArray( pDescriptor );
+        PHostArray pHostData = pSetMap->valArray( pDescriptor );
 
         for (DWORD j = 0; j < pHostData->Count; j++)
         { 
-            T4 pHost = pHostData->entry( pSetMap, j );
-            std::wstring hostName( reinterpret_cast<wchar_t*>(reinterpret_cast<uint8_t*>(pSetMap)+pHost->ValueOffset),
-                                   pHost->ValueLength / sizeof(wchar_t) );
+            PHostEntry pHost = pHostData->entry( pSetMap, j );
+            std::wstring hostName( 
+                reinterpret_cast<wchar_t*>(reinterpret_cast<uint8_t*>(pSetMap) + pHost->ValueOffset), 
+                pHost->ValueLength / sizeof( wchar_t ) 
+            );
 
             if (!hostName.empty())
-                vhosts.push_back( hostName );
+                vhosts.emplace_back( std::move( hostName ) );
         }
 
-        _apiSchema.insert( std::make_pair( dllName, vhosts ) );
+        _apiSchema.emplace( dllName, std::move( vhosts ) );
     }
 
     return true;
@@ -112,14 +101,15 @@ NTSTATUS NameResolve::ResolvePath(
     const std::wstring& baseName,
     const std::wstring& searchDir,
     eResolveFlag flags, 
-    DWORD procID, 
+    Process& proc,
     HANDLE actx /*= INVALID_HANDLE_VALUE*/ 
     )
 {
+    NTSTATUS status = STATUS_SUCCESS;
     wchar_t tmpPath[4096] = { 0 };
     std::wstring completePath;
 
-    std::transform( path.begin(), path.end(), path.begin(), ::tolower );
+    path = Utils::ToLower( std::move( path ) );
 
     // Leave only file name
     std::wstring filename = Utils::StripPath( path );
@@ -131,42 +121,47 @@ NTSTATUS NameResolve::ResolvePath(
     //
     // ApiSchema redirection
     //
-    auto iter = std::find_if( _apiSchema.begin(), _apiSchema.end(), [&filename]( const mapApiSchema::value_type& val ) { 
+    auto iter = std::find_if( _apiSchema.begin(), _apiSchema.end(), [&filename]( const auto& val ) { 
         return filename.find( val.first.c_str() ) != filename.npos; } );
 
     if (iter != _apiSchema.end())
     {
         // Select appropriate api host
-        path = iter->second.front() != baseName ? iter->second.front() : iter->second.back();
+        if (!iter->second.empty())
+            path = iter->second.front() != baseName ? iter->second.front() : iter->second.back();
+        else
+            path = baseName;
 
-        if (ProbeSxSRedirect( path, actx ) == STATUS_SUCCESS)
+        status = ProbeSxSRedirect( path, proc, actx );
+        if (NT_SUCCESS( status ) || status == STATUS_SXS_IDENTITIES_DIFFERENT)
         {
-            return STATUS_SUCCESS;
+            return status;
         }
         else if (flags & EnsureFullPath)
         {
             wchar_t sys_path[255] = { 0 };
             GetSystemDirectoryW( sys_path, 255 );
 
-            path = sys_path + path;
+            path = std::wstring( sys_path ) + L"\\" + path;
         }
         
-        return LastNtStatus( STATUS_SUCCESS );
+        return STATUS_SUCCESS;
     }
 
     if (flags & ApiSchemaOnly)
-        return LastNtStatus( STATUS_NOT_FOUND );
+        return STATUS_NOT_FOUND;
 
     // SxS redirection
-    if (ProbeSxSRedirect( path, actx ) == STATUS_SUCCESS)
-        return LastNtStatus( STATUS_SUCCESS );
+    status = ProbeSxSRedirect( path, proc, actx );
+    if (NT_SUCCESS( status ) || status == STATUS_SXS_IDENTITIES_DIFFERENT)
+        return status;
 
     if (flags & NoSearch)
-        return LastNtStatus( STATUS_NOT_FOUND );
+        return STATUS_NOT_FOUND;
 
     // Already a full-qualified name
     if (Utils::FileExists( path ))
-        return LastNtStatus( STATUS_SUCCESS );
+        return STATUS_SUCCESS;
 
     //
     // Perform search accordingly to Windows Image loader search order 
@@ -194,7 +189,10 @@ NTSTATUS NameResolve::ResolvePath(
                 dwSize = 255;
 
                 // In Win10 DllDirectory value got screwed, so less reliable method is used
-                GetSystemDirectoryW( sys_path, dwSize );
+                if (flags & Wow64)
+                    GetSystemWow64DirectoryW( sys_path, dwSize );
+                else
+                    GetSystemDirectoryW( sys_path, dwSize );
 
                 if (res == ERROR_SUCCESS)
                 {
@@ -226,7 +224,7 @@ NTSTATUS NameResolve::ResolvePath(
     //
     // 3. The directory from which the application was started.
     //
-    completePath = GetProcessDirectory( procID ) + L"\\" + filename;
+    completePath = GetProcessDirectory( proc.core().pid() ) + L"\\" + filename;
 
     if (Utils::FileExists( completePath ))
     {
@@ -237,7 +235,10 @@ NTSTATUS NameResolve::ResolvePath(
     //
     // 4. The system directory
     //
-    GetSystemDirectoryW( tmpPath, ARRAYSIZE( tmpPath ) );
+    if (flags & Wow64)
+        GetSystemWow64DirectoryW( tmpPath, ARRAYSIZE( tmpPath ) );
+    else
+        GetSystemDirectoryW( tmpPath, ARRAYSIZE( tmpPath ) );
 
     completePath = std::wstring( tmpPath ) + L"\\" + filename;
 
@@ -290,7 +291,7 @@ NTSTATUS NameResolve::ResolvePath(
         }
     }
 
-    return LastNtStatus( STATUS_NOT_FOUND );
+    return STATUS_NOT_FOUND;
 }
 
 
@@ -298,9 +299,10 @@ NTSTATUS NameResolve::ResolvePath(
 /// Try SxS redirection
 /// </summary>
 /// <param name="path">Image path.</param>
+/// <param name="proc">Process. Used to search process executable directory</param>
 /// <param name="actx">Activation context</param>
 /// <returns></returns>
-NTSTATUS NameResolve::ProbeSxSRedirect( std::wstring& path, HANDLE actx /*= INVALID_HANDLE_VALUE*/ )
+NTSTATUS NameResolve::ProbeSxSRedirect( std::wstring& path, Process& proc, HANDLE actx /*= INVALID_HANDLE_VALUE*/ )
 {
     UNICODE_STRING OriginalName = { 0 };
     UNICODE_STRING DllName1 = { 0 };
@@ -335,7 +337,11 @@ NTSTATUS NameResolve::ProbeSxSRedirect( std::wstring& path, HANDLE actx /*= INVA
 
     if (status == STATUS_SUCCESS)
     {
-        path = pPath->Buffer;
+        // Arch mismatch, local SxS redirection is incorrect
+        if (proc.barrier().mismatch)
+            return STATUS_SXS_IDENTITIES_DIFFERENT;
+        else
+            path = pPath->Buffer;
     }
     else
     {
@@ -343,7 +349,7 @@ NTSTATUS NameResolve::ProbeSxSRedirect( std::wstring& path, HANDLE actx /*= INVA
             SAFE_CALL( RtlFreeUnicodeString, &DllName2);
     }
 
-    return LastNtStatus( status );
+    return status;
 }
 
 /// <summary>
@@ -353,20 +359,17 @@ NTSTATUS NameResolve::ProbeSxSRedirect( std::wstring& path, HANDLE actx /*= INVA
 /// <returns>Process executable directory</returns>
 std::wstring NameResolve::GetProcessDirectory( DWORD pid )
 {
-    HANDLE snapshot = 0;
+    SnapHandle snapshot;
     MODULEENTRY32W mod = { sizeof(MODULEENTRY32W), 0 };
     std::wstring path = L"";
 
-    if ((snapshot = CreateToolhelp32Snapshot( TH32CS_SNAPMODULE, pid )) == INVALID_HANDLE_VALUE)
-        return L"";
-
-    if (Module32FirstW( snapshot, &mod ) == TRUE)
+    if ((snapshot = CreateToolhelp32Snapshot( TH32CS_SNAPMODULE, pid )) && 
+        Module32FirstW( snapshot, &mod ) != FALSE
+        )
     {
         path = mod.szExePath;
         path = path.substr( 0, path.rfind( L"\\" ) );
     }
-
-    CloseHandle( snapshot );
 
     return path;
 }

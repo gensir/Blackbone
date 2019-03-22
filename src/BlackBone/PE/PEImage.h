@@ -3,6 +3,7 @@
 #include "../Config.h"
 #include "../Include/Winheaders.h"
 #include "../Include/Types.h"
+#include "../Include/HandleGuard.h"
 #include "../Misc/Utils.h"
 
 #ifdef COMPILER_MSVC
@@ -22,6 +23,13 @@ namespace blackbone
 
 namespace pe
 {
+
+enum AddressType
+{
+    RVA,    // Relative virtual
+    VA,     // Absolute virtual
+    RPA,    // Relative physical
+};
 
 // Relocation block information
 struct RelocData
@@ -71,17 +79,17 @@ struct ExportData
 };
 
 // Imports and sections related
-typedef std::unordered_map<std::wstring, std::vector<ImportData>> mapImports;
-typedef std::vector<IMAGE_SECTION_HEADER> vecSections;
-typedef std::vector<ExportData> vecExports;
+using mapImports  = std::unordered_map<std::wstring, std::vector<ImportData>>;
+using vecSections = std::vector<IMAGE_SECTION_HEADER>;
+using vecExports  = std::vector<ExportData>;
 
 /// <summary>
 /// Primitive PE parsing class
 /// </summary>
 class PEImage
 {
-    typedef const IMAGE_NT_HEADERS32* PCHDR32;
-    typedef const IMAGE_NT_HEADERS64* PCHDR64;
+    using PCHDR32 = const IMAGE_NT_HEADERS32*;
+    using PCHDR64 = const IMAGE_NT_HEADERS64*;
     
 public:
     BLACKBONE_API PEImage( void );
@@ -150,7 +158,7 @@ public:
     /// <param name="index">Directory index</param>
     /// <param name="keepRelative">Keep address relative to image base</param>
     /// <returns>Directory address</returns>
-    BLACKBONE_API size_t DirectoryAddress( int index, bool keepRelative = false ) const;
+    BLACKBONE_API uintptr_t DirectoryAddress( int index, AddressType type = VA ) const;
 
     /// <summary>
     /// Get data directory size
@@ -163,9 +171,9 @@ public:
     /// Resolve virtual memory address to physical file offset
     /// </summary>
     /// <param name="Rva">Memory address</param>
-    /// <param name="keepRelative">Keep address relative to file start</param>
+    /// <param name="type">Address type to return</param>
     /// <returns>Resolved address</returns>
-    BLACKBONE_API uintptr_t ResolveRVAToVA( uintptr_t Rva, bool keepRelative = false ) const;
+    BLACKBONE_API uintptr_t ResolveRVAToVA( uintptr_t Rva, AddressType type = VA ) const;
 
     /// <summary>
     /// Get image path
@@ -195,7 +203,7 @@ public:
     /// Get image size in bytes
     /// </summary>
     /// <returns>Image size</returns>
-    BLACKBONE_API inline size_t imageSize() const { return _imgSize; }
+    BLACKBONE_API inline uint32_t imageSize() const { return _imgSize; }
 
     /// <summary>
     /// Get size of image headers
@@ -268,8 +276,14 @@ public:
     /// <summary>
     /// If true - no actual PE file available on disk
     /// </summary>
-    /// <returns></returns>
+    /// <returns>Flag</returns>
     BLACKBONE_API inline bool noPhysFile() const { return _noFile; }
+
+    /// <summary>
+    /// DllCharacteristics field of header
+    /// </summary>
+    /// <returns>DllCharacteristics</returns>
+    BLACKBONE_API inline uint32_t DllCharacteristics() const { return _DllCharacteristics; }
 
 #ifdef COMPILER_MSVC
     /// <summary>
@@ -296,8 +310,8 @@ private:
     void* GetManifest( uint32_t& size, int32_t& manifestID );
 
 private:
-    HANDLE      _hFile = INVALID_HANDLE_VALUE;  // Target file HANDLE
-    HANDLE      _hMapping = NULL;               // Memory mapping object
+    FileHandle  _hFile;                         // Target file HANDLE
+    Handle      _hMapping;                      // Memory mapping object
     void*       _pFileBase = nullptr;           // Mapping base
     bool        _isPlainData = false;           // File mapped as plain data file
     bool        _is64 = false;                  // Image is 64 bit
@@ -310,10 +324,11 @@ private:
     uint32_t    _imgSize = 0;                   // Image size
     uint32_t    _epRVA = 0;                     // Entry point RVA
     uint32_t    _hdrSize = 0;                   // Size of headers
-    HANDLE      _hctx = INVALID_HANDLE_VALUE;   // Activation context
+    ACtxHandle   _hctx;                          // Activation context
     int32_t     _manifestIdx = 0;               // Manifest resource ID
     uint32_t    _subsystem = 0;                 // Image subsystem
     int32_t     _ILFlagOffset = 0;              // Offset of pure IL flag
+    uint32_t    _DllCharacteristics = 0;        // DllCharacteristics flags
 
     vecSections _sections;                      // Section info
     mapImports  _imports;                       // Import functions
@@ -323,7 +338,7 @@ private:
     std::wstring _manifestPath;                 // Image manifest container
 
 #ifdef COMPILER_MSVC
-    ImageNET    _netImage;                  // .net image info
+    ImageNET    _netImage;                      // .net image info
 #endif
 };
 

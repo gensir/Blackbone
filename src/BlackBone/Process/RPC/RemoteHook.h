@@ -33,8 +33,8 @@ public:
     };
 
     // Hook callback prototype
-    typedef void( *fnCallback )(RemoteContext& context);
-    typedef void( __thiscall* fnClassCallback )(const void* __this, RemoteContext& context);
+    using fnCallback = void( *)(RemoteContext& context);
+    using fnClassCallback = void( __thiscall* )(const void* __this, RemoteContext& context);
 
     /// <summary>
     /// Hook descriptor
@@ -64,9 +64,9 @@ public:
         _CONTEXT64 entryCtx;            // Thread context on function entry (used in function return hook)
     };
 
-    typedef std::map<ptr_t, HookData> mapHook;
-    typedef std::map<ptr_t, ptr_t> mapAddress;
-    typedef std::map<ptr_t, bool> setAddresses;
+    using mapHook = std::map<ptr_t, HookData>;
+    using mapAddress = std::map<ptr_t, ptr_t>;
+    using setAddresses = std::map<ptr_t, bool>;
 
 public:
     BLACKBONE_API RemoteHook( class ProcessMemory& memory );
@@ -80,7 +80,7 @@ public:
     /// <param name="newFn">Callback</param>
     /// <param name="pThread">Thread to hook. Valid only for HWBP</param>
     /// <returns>true on success</returns>
-    BLACKBONE_API inline NTSTATUS Apply( eHookType type, uint64_t ptr, fnCallback newFn, Thread* pThread = nullptr )
+    BLACKBONE_API inline NTSTATUS Apply( eHookType type, uint64_t ptr, fnCallback newFn, ThreadPtr pThread = nullptr )
     {
         return ApplyP( type, ptr, newFn, nullptr, pThread );
     }
@@ -110,7 +110,7 @@ public:
     /// <param name="pThread">Thread to hook. Valid only for HWBP</param>
     /// <returns>true on success</returns>
     template<typename C>
-    inline NTSTATUS Apply( eHookType type, uint64_t ptr, void(C::* newFn)(RemoteContext& ctx), const C& classRef, Thread* pThread = nullptr )
+    inline NTSTATUS Apply( eHookType type, uint64_t ptr, void(C::* newFn)(RemoteContext& ctx), const C& classRef, ThreadPtr pThread = nullptr )
     {
         return ApplyP( type, ptr, brutal_cast<fnCallback>(newFn), &classRef, pThread );
     }
@@ -152,7 +152,7 @@ private:
     /// <param name="pClass">Class reference.</param>
     /// <param name="pThread">Thread to hook. Valid only for HWBP</param>
     /// <returns>true on success</returns>
-    BLACKBONE_API NTSTATUS ApplyP( eHookType type, uint64_t ptr, fnCallback newFn, const void* pClass = nullptr, Thread* pThread = nullptr );
+    BLACKBONE_API NTSTATUS ApplyP( eHookType type, uint64_t ptr, fnCallback newFn, const void* pClass = nullptr, ThreadPtr pThread = nullptr );
 
     /// <summary>
     /// Hook function return

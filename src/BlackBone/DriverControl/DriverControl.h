@@ -3,6 +3,7 @@
 #include "../Include/Winheaders.h"
 #include "../Include/Types.h"
 #include "../Include/Macro.h"
+#include "../Include/HandleGuard.h"
 #include "../../BlackBoneDrv/BlackBoneDef.h"
 
 #include <string>
@@ -14,7 +15,7 @@ ENUM_OPS( KMmapFlags );
 namespace blackbone
 {
 // [Original ptr, size] <--> [Mapped ptr]
-typedef std::map < std::pair<ptr_t, uint32_t>, ptr_t > mapMemoryMap;
+using mapMemoryMap = std::map<std::pair<ptr_t, uint32_t>, ptr_t>;
 
 struct MapMemoryResult
 {
@@ -75,9 +76,16 @@ public:
     /// Change process protection flag
     /// </summary>
     /// <param name="pid">Target PID</param>
-    /// <param name="enable">true to enable protection, false to disable</param>
+    /// <param name="protection">Process protection policy</param>
+    /// <param name="dynamicCode">Prohibit dynamic code</param>
+    /// <param name="binarySignature">Prohibit loading non-microsoft dlls</param>
     /// <returns>Status code</returns>
-    BLACKBONE_API NTSTATUS ProtectProcess( DWORD pid, bool enable );
+    BLACKBONE_API NTSTATUS ProtectProcess( 
+        DWORD pid, 
+        PolicyOpt protection, 
+        PolicyOpt dynamicCode = Policy_Keep,
+        PolicyOpt binarySignature = Policy_Keep
+    );
 
     /// <summary>
     /// Change handle access rights
@@ -304,7 +312,7 @@ private:
     /// <returns>Status code</returns>
     LSTATUS PrepareDriverRegEntry( const std::wstring& svcName, const std::wstring& path );
 private:
-    HANDLE _hDriver = INVALID_HANDLE_VALUE;
+    FileHandle _hDriver;
     NTSTATUS _loadStatus = STATUS_NOT_FOUND;
 };
 
